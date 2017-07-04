@@ -4,6 +4,7 @@ import ast
 import requests
 import json
 import os
+import time
 from botocore.exceptions import ClientError
 
 
@@ -24,7 +25,7 @@ def initialize_s3(bucket, key):
 def lambda_handler(event, context):
     s3 = boto3.client('s3')
     code_pipeline = boto3.client('codepipeline')
-
+    code_commit = boto3.client('codecommit')
     software_name = os.environ['SOFTWARE']
 
     build_start = os.environ['BUILD_START']
@@ -55,6 +56,20 @@ def lambda_handler(event, context):
             status = code_pipeline.get_pipeline_execution(pipelineName=pipeline,pipelineExecutionId=execution_id)
             status_string = status['pipelineExecution']['status']
             if status_string != pipelines_statuses[pipeline]:
+
+                if not status['pipelineExecution']['artifactRevisions']:
+                    # We dont have yet revision status so lets break out
+
+                    print "Empty artifact revisions - breaking"
+                    print (status)
+                    break
+                artifact_url = status['pipelineExecution']['artifactRevisions'][0]['revisionUrl']
+                commit_id = artifact_url.split('/')[-1]
+                git_repository = artifact_url.split('/')[-3]
+                commit_info = code_commit.get_commit(repositoryName=git_repository, commitId=commit_id)
+                author = commit_info['commit']['committer']['name']
+                commit_message = commit_info['commit']['message']
+
                 filename = "/tmp/" + str(uuid.uuid4())
                 pipelines_statuses[pipeline] = status_string
                 f = open(filename, 'w+')
@@ -63,6 +78,8 @@ def lambda_handler(event, context):
                 s3.upload_fileobj(f, bucket, key)
                 f.close()
                 message = software_name + " proudly presents: Status change in: " + pipeline + " New status: " + status_string
+                pre_text = "Status change in: " + pipeline
+
                 url = build_start
                 if status_string == "InProgress":
                     url = build_start
@@ -70,8 +87,27 @@ def lambda_handler(event, context):
                     url = success
                 if status_string == "Failed":
                     url = failure
+                slack_message = {
+                    "attachments": [
+                        {
+                            "fallback": message,
+                            "color": "#36a64f",
+                            "pretext": pre_text,
+                            "author_name": author,
+                            "title": software_name,
+                            "title_link": artifact_url,
+                            "text": commit_message,
+                            "fields": [
+                                {
+                                    "title": status_string,
+                                    "short": False
+                                }
+                            ]
+                        }
+                    ]
+                }
                 response = requests.post(
-                    url, data=json.dumps({'text': message}),
+                    url, data=json.dumps(slack_message),
                     headers={'Content-Type': 'application/json'}
                 )
 
@@ -81,9 +117,7 @@ def lambda_handler(event, context):
             # No file so lets create it
             initialize_s3(bucket, key)
         print "Something else went wrong"
-
-
-
+        print (e)
 
 
 
