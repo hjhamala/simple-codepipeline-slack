@@ -4,9 +4,15 @@ import ast
 import requests
 import json
 import os
-import time
 from botocore.exceptions import ClientError
 
+def write_status(bucket, key, statuses):
+    filename = "/tmp/" + str(uuid.uuid4())
+    f = open(filename, 'w+')
+    f.write(str(statuses))
+    f = open(filename, 'r+')
+    s3.upload_fileobj(f, bucket, key)
+    f.close()
 
 def initialize_s3(bucket, key):
     s3 = boto3.client('s3')
@@ -15,12 +21,7 @@ def initialize_s3(bucket, key):
     pipelines_statuses_t = {}
     for pipeline in code_pipeline.list_pipelines()["pipelines"]:
         pipelines_statuses_t.update({pipeline['name'] : "Succeeded"})
-    filename = "/tmp/" + str(uuid.uuid4())
-    f = open(filename, 'w+')
-    f.write(str(pipelines_statuses_t))
-    f = open(filename, 'r+')
-    s3.upload_fileobj(f, bucket, key)
-    f.close()
+    write_status(bucket, key, pipelines_statuses_t)
 
 def lambda_handler(event, context):
     s3 = boto3.client('s3')
@@ -42,11 +43,7 @@ def lambda_handler(event, context):
         statuses = open(filename).read()
         pipelines_statuses = ast.literal_eval(statuses)
 
-        pipelines_statuses_t = {}
-        for pipeline in code_pipeline.list_pipelines()["pipelines"]:
-            pipelines_statuses_t.update({pipeline['name'] : "Succeeded"})
-
-        if len(pipelines_statuses) != len(pipelines_statuses_t):
+        if len(pipelines_statuses) != len(code_pipeline.list_pipelines()["pipelines"]):
             print('Pipelines changed')
             initialize_s3(bucket, key)
 
@@ -62,21 +59,15 @@ def lambda_handler(event, context):
 
                     print "Empty artifact revisions - breaking"
                     print (status)
-                    break
+                    continue
                 artifact_url = status['pipelineExecution']['artifactRevisions'][0]['revisionUrl']
                 commit_id = artifact_url.split('/')[-1]
                 git_repository = artifact_url.split('/')[-3]
                 commit_info = code_commit.get_commit(repositoryName=git_repository, commitId=commit_id)
                 author = commit_info['commit']['committer']['name']
                 commit_message = commit_info['commit']['message']
-
-                filename = "/tmp/" + str(uuid.uuid4())
                 pipelines_statuses[pipeline] = status_string
-                f = open(filename, 'w+')
-                f.write(str(pipelines_statuses))
-                f = open(filename, 'r+')
-                s3.upload_fileobj(f, bucket, key)
-                f.close()
+
                 message = software_name + " proudly presents: Status change in: " + pipeline + " New status: " + status_string
                 pre_text = "Status change in: " + pipeline
 
@@ -110,6 +101,7 @@ def lambda_handler(event, context):
                     url, data=json.dumps(slack_message),
                     headers={'Content-Type': 'application/json'}
                 )
+        write_status(bucket, key, pipelines_statuses)
 
 
     except ClientError as e:
